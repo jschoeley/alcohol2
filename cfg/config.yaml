@@ -1,0 +1,7 @@
+# Global constants
+
+# figure specifications
+figspec:
+  dimensions: { width: 180 }
+  colors:
+    sex: { 'Male': '#004b87', 'Female': '#c60c30' }
