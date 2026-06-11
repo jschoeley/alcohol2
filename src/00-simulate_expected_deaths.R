@@ -255,6 +255,45 @@ for (i in unique(skeleton$Country)) {
 }
 dev.off()
 
+# Demonstration -----------------------------------------------------------
+
+ready_for_excess <-
+  expected_vs_observed_sim |>
+  ungroup() |>
+  pivot_wider(names_from = sim, values_from = XPC_SIM, names_prefix = 'XPC_SIM_') |>
+  mutate(
+    stratum = paste(Country, Sex, sep = '-'),
+    origin_time = period-min(period), cv_flag = period %in% cnst$forecast_years
+  ) |>
+  select(stratum, period, age, OBS, XPC_AVG, starts_with('XPC_SIM_'))
+
+expected$total %>%
+  GetExcessByCause(
+    name_parts = c('pA', 'pB', 'pC', 'pD', 'pE'),
+    measure = 'pscore'
+  ) %>%
+  pivot_longer(cols = starts_with('Q')) %>%
+  separate(col = name, into = c('quantile', 'part'), sep = '_') %>%
+  pivot_wider(names_from = quantile, values_from = value) %>%
+  filter(cv_flag == 'test') %>%
+  ggplot(aes(x = origin_time)) +
+  geom_ribbon(
+    aes(ymin = Q025, ymax = Q975),
+    color = NA, fill = 'grey80') +
+  geom_hline(yintercept = 0) +
+  geom_line(
+    aes(y = Q500), color = 'red'
+  ) +
+  scale_x_continuous(breaks = 0:40) +
+  facet_wrap(~ part, scales = 'free_y') +
+  theme_minimal() +
+  labs(
+    title = 'Percent excess by cause',
+    y = 'Monthly P-score',
+    x = 'Months since 2015'
+  )
+
+
 # Export ------------------------------------------------------------------
 
 # export results of analysis
