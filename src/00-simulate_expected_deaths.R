@@ -10,6 +10,7 @@ library(readr)
 library(dplyr)
 library(tidyr)
 library(ggplot2)
+library(rje)
 
 # Constants ---------------------------------------------------------------
 
@@ -17,24 +18,16 @@ library(ggplot2)
 setwd(".")
 paths <- list()
 paths$input <- list(
-  config = "./cfg/config.yaml",
-  global = "./src/_global_objects.R",
   ASDCounts_AllMar26.csv = "./dat/ASDCounts_AllMar26.csv"
 )
 paths$output <- list(
   observed_vs_expected.pdf = "./out/observed_vs_expected.pdf"
 )
 
-# global configuration
-config <- read_yaml(paths$input$config)
-
-# global objects and functions
-global <- source(paths$input$global)
-
 # constants specific to this analysis
 cnst <- within(list(), {
   fitting_years = 2000:2019
-  forecast_years = 2020:2024
+  forecast_years = 2020:2023
   forecast_horizon = length(forecast_years)
   nsim = 100
   seed = 1987
@@ -42,6 +35,8 @@ cnst <- within(list(), {
 
 # list containers for analysis artifacts
 dat <- list()
+
+set.seed(cnst$seed)
 
 # Functions ---------------------------------------------------------------
 
@@ -67,7 +62,9 @@ asd <- left_join(skeleton, asd)
 
 asd_sub <-
   asd |>
-  filter(Definition == 'Full') |>
+  filter(
+    Definition == 'Full',
+  ) |>
   select(-Definition) |>
   # convert to integer to adhere with Poisson likelihood
   # round to closest integer
@@ -81,7 +78,7 @@ asd_sub <-
 # foo <-
 #   asd_sub |>
 #   nest(.by = c(Sex, Country)) |>
-#   filter(Sex == 'Male', Country == 'Hong Kong') |>
+#   filter(Sex == 'Male', Country == 'Argentina') |>
 #   unnest()
 #
 # .y <- foo |> select(Sex, Country) |> unique()
@@ -141,26 +138,29 @@ expected_vs_observed_sim <-
         Y_fcst <- Y[,period_labels_forecast_character]
 
         # fit LC model
-        LC_fit <-
-          PLCfit(Dxt = Y_fit, Ext = E_fit, config = PLCfitConfig(init_mode = 'svd'))
+        LC_fit <- PLCfit(
+          Dxt = Y_fit, Ext = E_fit,
+          label = paste0(.y, collapse = '-'),
+          config = PLCfitConfig(
+            init_mode = 'svd',
+            bx_sensitivity_threshold = 0.2,
+            lambda_ridge = 0
+          )
+        )
 
         # make forecast over excess period
         LC_sim <- PLCforecast(
-          theta = LC_fit$unconstrained_model_parameters,
-          h = H,
+          theta = LC_fit$model_parameters,
+          h = H, Ext_forecast = E_fcst,
+          jumpchoice = 'actual', sd_estimation = 'classic',
+          jumpoff_calibration_vector = LC_fit$jumpoff_calibration_vector,
+          kt_lookback = c(10, 10),
           nsim = cnst$nsim
         )
 
         # derive simulated counts with added Poisson variability over excess period
-        expected_counts_sim <- LC_sim$Eta_forecast_sim
-        for (k in 1:cnst$nsim) {
-          for (h in 1:H) {
-            expected_counts_sim[,h,k] <- rpois(
-              n = age_length,
-              lambda = exp(expected_counts_sim[,h,k])*E_fcst[,h]
-            )
-          }
-        }
+        expected_counts_sim <- LC_sim$Y_forecast_sim
+
         dimnames(expected_counts_sim) <- list(
           age = age_labels_character,
           period = period_labels_forecast_character,
@@ -198,9 +198,9 @@ expected_vs_observed_sim <-
 
         result_if_no_error <-
           output_skeleton |>
-          left_join(observed_df) |>
-          left_join(expected_avg_df) |>
-          left_join(expected_sim_df) |>
+          left_join(observed_df, by = c('period', 'age')) |>
+          left_join(expected_avg_df, by = c('period', 'age')) |>
+          left_join(expected_sim_df, by = c('period', 'age', 'sim')) |>
           mutate(
             stratum = paste0(.y, collapse = '-'),
             period = as.numeric(period)
@@ -229,7 +229,7 @@ expected_vs_observed_sim <-
 # Plot observed vs. expected by region and sex ----------------------------
 
 pdf(file=paths$output$observed_vs_expected.pdf)
-for (i in unique(skeleton$Country)) {
+for (i in unique(asd_sub$Country)) {
   cat("Plot", i, "\n")
   the_plot <-
     expected_vs_observed_sim |>
@@ -249,7 +249,6 @@ for (i in unique(skeleton$Country)) {
     ) +
     geom_vline(xintercept = 2019.5, color = "grey50") +
     facet_wrap(~age, scale = 'free_y') +
-    MyGGplotTheme(panel_border = TRUE) +
     labs(title = i, y = "A/D deaths", x = 'Year')
   print(the_plot)
 }
@@ -257,42 +256,29 @@ dev.off()
 
 # Demonstration -----------------------------------------------------------
 
-ready_for_excess <-
-  expected_vs_observed_sim |>
-  ungroup() |>
-  pivot_wider(names_from = sim, values_from = XPC_SIM, names_prefix = 'XPC_SIM_') |>
-  mutate(
-    stratum = paste(Country, Sex, sep = '-'),
-    origin_time = period-min(period), cv_flag = period %in% cnst$forecast_years
+expected_vs_observed_sim |>
+  filter(period %in% 2020:2023) |>
+  mutate(excess = OBS - XPC_SIM) |>
+  group_by(sim) |>
+  summarise(
+    excess = sum(excess, na.rm = T)
   ) |>
-  select(stratum, period, age, OBS, XPC_AVG, starts_with('XPC_SIM_'))
-
-expected$total %>%
-  GetExcessByCause(
-    name_parts = c('pA', 'pB', 'pC', 'pD', 'pE'),
-    measure = 'pscore'
-  ) %>%
-  pivot_longer(cols = starts_with('Q')) %>%
-  separate(col = name, into = c('quantile', 'part'), sep = '_') %>%
-  pivot_wider(names_from = quantile, values_from = value) %>%
-  filter(cv_flag == 'test') %>%
-  ggplot(aes(x = origin_time)) +
-  geom_ribbon(
-    aes(ymin = Q025, ymax = Q975),
-    color = NA, fill = 'grey80') +
-  geom_hline(yintercept = 0) +
-  geom_line(
-    aes(y = Q500), color = 'red'
-  ) +
-  scale_x_continuous(breaks = 0:40) +
-  facet_wrap(~ part, scales = 'free_y') +
-  theme_minimal() +
-  labs(
-    title = 'Percent excess by cause',
-    y = 'Monthly P-score',
-    x = 'Months since 2015'
+  ungroup() |>
+  summarise(
+    excess_med = median(excess),
+    excess_avg = mean(excess),
+    excess_q025 = quantile(excess, 0.025),
+    excess_q975 = quantile(excess, 0.975)
   )
 
+expected_vs_observed_sim |>
+  filter(
+    period %in% 2020:2023
+  ) |>
+  group_by(Country) |>
+  summarise(
+    any_na_in_expected_sims = anyNA(XPC_SIM)
+  ) |> View()
 
 # Export ------------------------------------------------------------------
 
